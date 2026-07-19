@@ -13,11 +13,18 @@ from .collection import (
     query_sparql,
 )
 from .datacite import DataCite
-from .dataset import get_dataset, list_files
+from .dataset import (
+    create_dataset,
+    edit_dataset,
+    edit_dataset_fields,
+    get_dataset,
+    list_files,
+)
 from .dataverse import get_metrics
 from .file import read_file, read_tabular, tabular_schema
 from .middleware import DataverseMiddleware
 from .search import search
+from .vocabulary import DEFAULT_SOURCES, VocabularySource, search_vocabulary
 
 DataverseType: TypeAlias = Union[Dataverse, Dict[str, Dataverse]]
 
@@ -44,13 +51,18 @@ class MCPConfiguration(BaseModel):
         default_factory=lambda: ["read", "graph"],
         description="Controls the tools that are available for the collection level.",
     )
-    dataset: List[Literal["read"]] = Field(
+    dataset: List[Literal["read", "create", "edit"]] = Field(
         default_factory=lambda: ["read"],
         description="Controls the tools that are available for the dataset level.",
     )
     file: List[Literal["read", "metadata", "edit"]] = Field(
         default_factory=lambda: ["read", "metadata"],
         description="Controls the tools that are available for the file level.",
+    )
+    vocabulary_sources: List[VocabularySource] = Field(
+        default_factory=lambda: list(DEFAULT_SOURCES),
+        description="Controlled-vocabulary services the Search_Vocabulary tool queries. "
+        "Defaults to Wikidata + the EBI OLS; a deployment can add its own OLS-compatible endpoints.",
     )
 
 
@@ -109,12 +121,71 @@ class DataverseMCP:
         Args:
             mcp: The FastMCP instance to configure with Dataverse tools.
         """
-        mcp.add_middleware(DataverseMiddleware(dataverse=self.dataverse))
+        mcp.add_middleware(
+            DataverseMiddleware(
+                dataverse=self.dataverse,
+                vocabulary_sources=self.config.vocabulary_sources,
+            )
+        )
         self._add_dataverse_tools(mcp)
         self._add_dataset_tools(mcp)
         self._add_file_tools(mcp)
         self._add_collection_tools(mcp)
         self._add_search_tools(mcp)
+        self._set_instructions(mcp)
+
+    def _set_instructions(self, mcp: FastMCP):
+        """Set model-facing server instructions describing the enabled workflow.
+
+        Instructions are sent in the MCP handshake and are the always-in-context
+        channel for guiding the model on how the tools relate. Built from the
+        config so writing guidance only appears when those tools are enabled.
+        """
+        lines = [
+            f"This server works with datasets on the Dataverse at {self.base_url}.",
+            "Search and read datasets, collections, and files with the read tools.",
+        ]
+
+        can_create = "create" in self.config.dataset
+        can_edit = "edit" in self.config.dataset
+        if can_create or can_edit:
+            verbs = []
+            if can_create:
+                verbs.append("create draft datasets (Create_Dataset)")
+            if can_edit:
+                verbs.append(
+                    "enrich or modify existing drafts (Edit_Dataset_Metadata for common "
+                    "citation fields, Edit_Dataset_Fields for any other field or block)"
+                )
+            lines.append("You can also " + " and ".join(verbs) + ".")
+            lines.append(
+                "A dataset is authored incrementally: create it from the core citation "
+                "metadata (title, description, subject, one author and contact), then "
+                "enrich it — more authors, keywords, funding, coverage — by editing."
+                if can_create and can_edit
+                else ""
+            )
+            lines.append(
+                "When editing a multi-value field (authors, contacts, subjects), pass the "
+                "COMPLETE desired list — it replaces the existing values. To add one item, "
+                "read the current values first (Get_Dataset_Metadata), then send the full list."
+            )
+            lines.append(
+                "All writes produce or update a DRAFT. Never publish; publishing is a "
+                "separate step the user performs themselves."
+            )
+
+        mcp.instructions = "\n".join(line for line in lines if line)
+
+    def _tool(self, mcp: FastMCP, fn, *, enabled: bool = True, **kwargs):
+        """Register a tool, honoring a config gate.
+
+        FastMCP v3 dropped the ``enabled=`` kwarg on ``mcp.tool``; we register
+        then disable to preserve the same config-gated behaviour.
+        """
+        mcp.tool(fn, **kwargs)
+        if not enabled:
+            mcp.disable(names={kwargs["name"]}, components={"tool"})
 
     def _add_dataverse_tools(self, mcp: FastMCP):
         """
@@ -127,7 +198,7 @@ class DataverseMCP:
             mcp: The FastMCP instance to add tools to.
         """
         if "metrics" in self.config.dataverse:
-            mcp.tool(
+            self._tool(mcp, 
                 get_metrics,
                 name="Dataverse_Metrics",
                 description=f"Get metrics from the dataverse in total and for the past 7 days. This tool returns the metrics of the dataverse in a TOON format. {self.base_url_instructions}",
@@ -146,7 +217,7 @@ class DataverseMCP:
         """
         available_metadatablocks = self._all_metadatablocks()
 
-        mcp.tool(
+        self._tool(mcp, 
             get_dataset,
             name="Get_Dataset_Metadata",
             enabled="read" in self.config.dataset,
@@ -161,11 +232,58 @@ class DataverseMCP:
             """.strip(),
         )
 
-        mcp.tool(
+        self._tool(mcp, 
             list_files,
             name="List_Files_in_Dataset",
             enabled="read" in self.config.dataset,
             description=f"List the files in a dataset. This tool returns the files in a TOON format. {self.base_url_instructions}",
+        )
+
+        self._tool(mcp, 
+            create_dataset,
+            name="Create_Dataset",
+            enabled="create" in self.config.dataset,
+            description=f"""
+            Create a new DRAFT dataset and add it to a collection. Provide the core citation metadata:
+            title, description, authors, contacts, and subjects (from the controlled vocabulary).
+            Start here for a new dataset, then enrich it (more authors, keywords, funding, coverage)
+            with Edit_Dataset_Metadata. This does NOT publish — publishing is a separate, explicit step.
+            Requires the server to be connected with an authenticated (API-token) Dataverse instance.
+            Returns the new dataset's persistent identifier and URL.
+
+            {self.base_url_instructions}
+            """.strip(),
+        )
+
+        self._tool(
+            mcp,
+            edit_dataset,
+            name="Edit_Dataset_Metadata",
+            enabled="edit" in self.config.dataset,
+            description=f"""
+            Edit citation metadata on an existing DRAFT dataset (upsert). Change any of
+            title, description, authors, contacts, subjects — only the fields you pass are replaced.
+            Multi-value fields (authors/contacts/subjects) are replaced wholesale: to ADD one,
+            first read current values with Get_Dataset_Metadata and pass the full merged list.
+            Does NOT publish. Requires an authenticated (API-token) connection.
+
+            {self.base_url_instructions}
+            """.strip(),
+        )
+
+        self._tool(
+            mcp,
+            edit_dataset_fields,
+            name="Edit_Dataset_Fields",
+            enabled="edit" in self.config.dataset,
+            description=f"""
+            Edit ANY metadata field on a DRAFT dataset (generic upsert), for fields the friendly
+            Edit_Dataset_Metadata tool doesn't expose (keywords, publications, funding, coverage,
+            or any field in blocks like geospatial/EngMeta). Pass a mapping of field name -> value
+            following the field's schema; each field is replaced wholesale. Does NOT publish.
+
+            {self.base_url_instructions}
+            """.strip(),
         )
 
     def _add_file_tools(self, mcp: FastMCP):
@@ -180,7 +298,7 @@ class DataverseMCP:
         Args:
             mcp: The FastMCP instance to add tools to.
         """
-        mcp.tool(
+        self._tool(mcp, 
             read_tabular,
             name="Read_Tabular_File",
             enabled="read" in self.config.file,
@@ -194,7 +312,7 @@ class DataverseMCP:
             """.strip(),
         )
 
-        mcp.tool(
+        self._tool(mcp, 
             read_file,
             name="Read_File_Content",
             enabled="read" in self.config.file,
@@ -205,7 +323,7 @@ class DataverseMCP:
             """.strip(),
         )
 
-        mcp.tool(
+        self._tool(mcp, 
             tabular_schema,
             name="Get_Tabular_File_Schema",
             enabled="read" in self.config.file,
@@ -222,14 +340,14 @@ class DataverseMCP:
             mcp: The FastMCP instance to add tools to.
         """
 
-        mcp.tool(
+        self._tool(mcp, 
             get_collection_metadata,
             name="Get_Collection_Metadata",
             enabled="read" in self.config.collection,
             description=f"Get the metadata of a collection. This tool returns the metadata of the collection in a TOON format. {self.base_url_instructions}",
         )
 
-        mcp.tool(
+        self._tool(mcp, 
             list_content,
             name="List_Content_of_Collection",
             enabled="read" in self.config.collection,
@@ -241,7 +359,7 @@ class DataverseMCP:
             """.strip(),
         )
 
-        mcp.tool(
+        self._tool(mcp, 
             get_graph_summary,
             name="Knowledge_Graph_Summary",
             enabled="graph" in self.config.collection,
@@ -256,7 +374,7 @@ class DataverseMCP:
             """.strip(),
         )
 
-        mcp.tool(
+        self._tool(mcp, 
             query_sparql,
             name="Query_Knowledge_Graph",
             enabled="graph" in self.config.collection,
@@ -282,16 +400,30 @@ class DataverseMCP:
             mcp: The FastMCP instance to add tools to.
         """
 
-        mcp.tool(
+        self._tool(mcp, 
             search,
             name="Search_Dataverse",
             description="Search for datasets and collections in the dataverse. This tool returns the search results in a TOON format.",
         )
 
-        mcp.tool(
+        self._tool(mcp,
             DataCite.search,
             name="Search_DataCite",
             description="Search for datasets in DataCite. This tool returns the search results in a TOON format.",
+        )
+
+        configured = ", ".join(s.name for s in self.config.vocabulary_sources)
+        self._tool(mcp,
+            search_vocabulary,
+            name="Search_Vocabulary",
+            description=f"""
+            Look up a term in controlled vocabularies to link a keyword or topic classification.
+            Configured sources: {configured}. By default searches all of them; pass `source` with a
+            source name to narrow. Returns candidate terms with their vocabulary short name and term
+            URI — use these to add a PROPERLY LINKED keyword via a metadata-edit tool (keywordValue +
+            keywordVocabulary + keywordTermURI), rather than a bare free-text keyword. Present options
+            and let the user pick. Returns results in a TOON format.
+            """.strip(),
         )
 
     def _all_metadatablocks(self) -> List[str]:

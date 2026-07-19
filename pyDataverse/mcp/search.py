@@ -104,7 +104,7 @@ class CompactSearchResult(BaseModel):
         return result
 
 
-def search(
+async def search(
     query: Annotated[str, "The search query string to execute"],
     collection: Annotated[
         Optional[str],
@@ -152,7 +152,7 @@ def search(
         # Returns only datasets matching "temperature" within "climate-dataverse"
     """
 
-    dataverse = ensure_dataverse(ctx, base_url=base_url)
+    dataverse = await ensure_dataverse(ctx, base_url=base_url)
 
     if collection:
         coll = dataverse.collections[collection]

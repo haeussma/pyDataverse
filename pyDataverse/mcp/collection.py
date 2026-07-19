@@ -10,7 +10,7 @@ from ..dataverse import Dataverse
 from .utils import ensure_dataverse
 
 
-def get_collection_metadata(
+async def get_collection_metadata(
     collection: Annotated[
         Union[str, Literal["root"]],
         "The identifier/alias of the collection, which can be a persistent identifier or the special value 'root' for the root collection.",
@@ -24,11 +24,11 @@ def get_collection_metadata(
     """
     Get the metadata of a collection.
     """
-    dataverse = ensure_dataverse(ctx, base_url=base_url)
+    dataverse = await ensure_dataverse(ctx, base_url=base_url)
     return encode(dataverse.collections[collection].metadata.model_dump())
 
 
-def list_content(
+async def list_content(
     collection: Annotated[
         Union[str, Literal["root"]],
         "The identifier/alias of the collection, which can be a persistent identifier or the special value 'root' for the root collection.",
@@ -62,7 +62,7 @@ def list_content(
         - content_type: Type of content ("dataset" or "collection")
         - title: Display title/name of the content
     """
-    dataverse = ensure_dataverse(ctx, base_url=base_url)
+    dataverse = await ensure_dataverse(ctx, base_url=base_url)
     overview = dataverse.collections[collection].overview
 
     if filter_by and "content_type" in overview.columns:
@@ -71,7 +71,7 @@ def list_content(
     return encode(overview.to_dict(orient="records"))  # type: ignore[arg-type]
 
 
-def get_graph_summary(
+async def get_graph_summary(
     collection: Annotated[
         Union[str, Literal["root"]],
         "The identifier/alias of the collection, which can be a persistent identifier or the special value 'root' for the root collection.",
@@ -105,7 +105,7 @@ def get_graph_summary(
         - statistics: Dictionary with total_triples, total_subjects, class_count,
             and predicate_count
     """
-    dataverse = ensure_dataverse(ctx, base_url=base_url)
+    dataverse = await ensure_dataverse(ctx, base_url=base_url)
     return _get_graph_summary_cached(
         dataverse=dataverse,
         collection=collection,
@@ -114,7 +114,7 @@ def get_graph_summary(
     )
 
 
-def query_sparql(
+async def query_sparql(
     collection: Annotated[
         Union[str, Literal["root"]],
         "The identifier/alias of the collection, which can be a persistent identifier or the special value 'root' for the root collection.",
@@ -153,7 +153,7 @@ def query_sparql(
         - Single query: List of result rows
         - Batch queries: Dictionary mapping query names to {data, count, error?}
     """
-    dataverse = ensure_dataverse(ctx, base_url=base_url)
+    dataverse = await ensure_dataverse(ctx, base_url=base_url)
     graph = _get_graph_cached(
         dataverse=dataverse,
         collection=collection,
