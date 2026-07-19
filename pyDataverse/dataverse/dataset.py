@@ -128,7 +128,7 @@ class Dataset(ContentBase):
         then creates both a Dataverse instance and fetches the corresponding Dataset.
 
         Args:
-            doi_url (str): The DOI URL pointing to a dataset (e.g., "https://doi.org/10.18419/DARUS-5539")
+            doi_url (str): The DOI URL pointing to a dataset (e.g., "https://doi.org/10.5072/FK2/ABC123")
 
         Returns:
             Tuple[Dataverse, Dataset]: A tuple containing the Dataverse instance and the Dataset object
@@ -139,9 +139,9 @@ class Dataset(ContentBase):
             httpx.HTTPStatusError: If the HTTP request to the DOI URL fails
 
         Example:
-            >>> dataverse, dataset = Dataset.from_doi_url("https://doi.org/10.18419/DARUS-5539")
+            >>> dataverse, dataset = Dataset.from_doi_url("https://doi.org/10.5072/FK2/ABC123")
             >>> print(dataset.persistent_identifier)
-            doi:10.18419/DARUS-5539
+            doi:10.5072/FK2/ABC123
         """
         response = httpx.get(doi_url, follow_redirects=True)
         response.raise_for_status()

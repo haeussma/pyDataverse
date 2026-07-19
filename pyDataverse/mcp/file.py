@@ -79,7 +79,7 @@ PDF_MIME_TYPE = "application/pdf"
 IPYNB_MIME_TYPE = "application/x-ipynb+json"
 
 
-def read_file(
+async def read_file(
     identifier: Annotated[
         Union[str, int],
         "Dataset identifier: persistent identifier (string) or Dataverse database ID (integer).",
@@ -130,7 +130,7 @@ def read_file(
         >>> # Read a text file
         >>> text = read_file("doi:10.123/456", "data/readme.txt")
     """
-    file = _get_file_from_dataset(identifier, path, ctx, base_url=base_url)
+    file = await _get_file_from_dataset(identifier, path, ctx, base_url=base_url)
 
     # Check file size limit
     if file.size > MAX_FILE_SIZE:
@@ -185,7 +185,7 @@ def read_file(
     )
 
 
-def read_tabular(
+async def read_tabular(
     identifier: Annotated[
         Union[str, int],
         "Dataset identifier: persistent identifier (string) or Dataverse database ID (integer).",
@@ -251,7 +251,7 @@ def read_tabular(
         ...     read_kwargs={"sep": ";", "encoding": "latin-1"}
         ... )
     """
-    file = _get_file_from_dataset(identifier, path, ctx, base_url=base_url)
+    file = await _get_file_from_dataset(identifier, path, ctx, base_url=base_url)
     read_kwargs = read_kwargs or {}
 
     # Determine reading strategy based on parameters
@@ -269,7 +269,7 @@ def read_tabular(
     return encode(df.to_dict(orient="records"))
 
 
-def tabular_schema(
+async def tabular_schema(
     identifier: Annotated[
         Union[str, int],
         "Dataset identifier: persistent identifier (string) or Dataverse ID (integer).",
@@ -307,7 +307,7 @@ def tabular_schema(
         >>> schema = tabular_schema("doi:10.123/456", "data/file.csv")
         >>> # Returns schema with column names, types, etc.
     """
-    file = _get_file_from_dataset(identifier, path, ctx, base_url=base_url)
+    file = await _get_file_from_dataset(identifier, path, ctx, base_url=base_url)
     return encode(file.tabular_schema)
 
 
@@ -351,7 +351,7 @@ def _extract_pdf_text(file_bytes: bytes) -> List[TextContent]:
     return results
 
 
-def _get_file_from_dataset(
+async def _get_file_from_dataset(
     identifier: Union[str, int],
     path: str,
     ctx: Context,
@@ -372,7 +372,7 @@ def _get_file_from_dataset(
         RuntimeError: If Dataverse is not configured in the context
         KeyError: If the file path is not found in the dataset
     """
-    dataverse = ensure_dataverse(ctx, base_url=base_url)
+    dataverse = await ensure_dataverse(ctx, base_url=base_url)
     dataset = dataverse.fetch_dataset(identifier=identifier)
     return dataset.files[path]
 

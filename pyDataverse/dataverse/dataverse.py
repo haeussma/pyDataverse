@@ -118,6 +118,78 @@ class Contact(TypedDict, total=False):
     affiliation: Optional[str]
 
 
+# --- native citation-field builders (shared by create/edit) ---
+def _prim(name: str, value: str) -> dict:
+    return {"typeName": name, "typeClass": "primitive", "multiple": False, "value": value}
+
+
+def _prim_field(name: str, value: str) -> dict:
+    return _prim(name, value)
+
+
+def _compound_field(name: str, values: List[dict]) -> dict:
+    return {"typeName": name, "typeClass": "compound", "multiple": True, "value": values}
+
+
+def _author_value(a: Author) -> dict:
+    assert a.get("name"), "author name is required"
+    entry = {"authorName": _prim("authorName", a["name"])}
+    if a.get("affiliation"):
+        entry["authorAffiliation"] = _prim("authorAffiliation", a["affiliation"])
+    if a.get("identifier_scheme"):
+        entry["authorIdentifierScheme"] = {
+            "typeName": "authorIdentifierScheme",
+            "typeClass": "controlledVocabulary",
+            "multiple": False,
+            "value": a["identifier_scheme"],
+        }
+    if a.get("identifier"):
+        entry["authorIdentifier"] = _prim("authorIdentifier", a["identifier"])
+    return entry
+
+
+def _contact_value(c: Contact) -> dict:
+    assert c.get("email"), "contact email is required"
+    entry = {"datasetContactEmail": _prim("datasetContactEmail", c["email"])}
+    if c.get("name"):
+        entry["datasetContactName"] = _prim("datasetContactName", c["name"])
+    if c.get("affiliation"):
+        entry["datasetContactAffiliation"] = _prim(
+            "datasetContactAffiliation", c["affiliation"]
+        )
+    return entry
+
+
+def _descriptor_from_spec(spec, value) -> dict:
+    """Build a native Dataverse field descriptor from a live field spec + a value.
+
+    Generic over every field shape, so no field needs hand-coding:
+      - primitive / controlledVocabulary, single   -> value is a scalar
+      - primitive / controlledVocabulary, multiple  -> value is a list of scalars
+      - compound, single                            -> value is {childName: childValue}
+      - compound, multiple                          -> value is [{childName: childValue}, ...]
+    """
+    d = {"typeName": spec.name, "typeClass": spec.type_class, "multiple": spec.multiple}
+    if spec.type_class == "compound":
+        children = spec.child_fields or {}
+
+        def entry(e: dict) -> dict:
+            built = {}
+            for cname, cval in e.items():
+                if cname not in children:
+                    raise ValueError(
+                        f"Unknown child field '{cname}' of '{spec.name}'. "
+                        f"Valid children: {sorted(children)}"
+                    )
+                built[cname] = _descriptor_from_spec(children[cname], cval)
+            return built
+
+        d["value"] = [entry(e) for e in value] if spec.multiple else entry(value)
+    else:
+        d["value"] = value
+    return d
+
+
 class Dataverse(BaseModel):
     """
     Factory class for creating Dataset instances with metadata blocks.
@@ -599,6 +671,118 @@ class Dataverse(BaseModel):
             dataset.refresh()
 
         return dataset
+
+    def edit_dataset_citation(
+        self,
+        identifier: str,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        authors: Optional[List[Author]] = None,
+        contacts: Optional[List[Contact]] = None,
+        subjects: Optional[List[Subject]] = None,
+        keywords: Optional[List[str]] = None,
+    ):
+        """Replace citation fields on an existing draft dataset (upsert).
+
+        Only the fields you pass are replaced (``replace=True``, scoped per
+        field — verified field-scoped against a live draft). Multi-value fields
+        (authors, contacts, subjects) are replaced wholesale, so pass the
+        COMPLETE desired list, not a delta. Draft only; does not publish.
+
+        Args:
+            identifier: Persistent id of the draft (e.g. ``doi:10.5072/FK2/ABC123``).
+            title: New title, if changing.
+            description: New description/abstract, if changing.
+            authors: Complete author list to set (each an ``Author``).
+            contacts: Complete contact list to set (each a ``Contact``).
+            subjects: Complete controlled-vocabulary subject list to set.
+
+        Returns:
+            The updated GetDatasetResponse.
+        """
+        fields: List[dict] = []
+        if title is not None:
+            fields.append(_prim_field("title", title))
+        if description is not None:
+            fields.append(
+                _compound_field(
+                    "dsDescription",
+                    [{"dsDescriptionValue": _prim("dsDescriptionValue", description)}],
+                )
+            )
+        if authors is not None:
+            fields.append(
+                _compound_field("author", [_author_value(a) for a in authors])
+            )
+        if contacts is not None:
+            fields.append(
+                _compound_field(
+                    "datasetContact", [_contact_value(c) for c in contacts]
+                )
+            )
+        if subjects is not None:
+            fields.append(
+                {
+                    "typeName": "subject",
+                    "typeClass": "controlledVocabulary",
+                    "multiple": True,
+                    "value": list(subjects),
+                }
+            )
+        if keywords is not None:
+            fields.append(
+                _compound_field(
+                    "keyword",
+                    [{"keywordValue": _prim("keywordValue", k)} for k in keywords],
+                )
+            )
+
+        if not fields:
+            raise ValueError("edit_dataset_citation: no fields to update were provided")
+
+        return self.native_api.edit_dataset_metadata(
+            identifier, {"fields": fields}, replace=True
+        )
+
+    def edit_dataset_fields(
+        self,
+        identifier: str,
+        fields: Dict[str, Any],
+        block: str = "citation",
+    ):
+        """Replace ANY metadata fields on a draft, built from the live block schema.
+
+        Generic escape hatch — no per-field code. Looks up each field in the block's
+        schema and constructs the correct native descriptor (primitive / controlled
+        vocabulary / compound, single or multiple). Each provided field is replaced
+        wholesale, so pass the COMPLETE value for multi-value fields. Draft only.
+
+        Args:
+            identifier: Persistent id of the draft (e.g. ``doi:10.5072/FK2/ABC123``).
+            fields: Mapping of field name -> value. Value shape follows the field's
+                schema: scalar for a single primitive/vocab field, list of scalars for
+                a multiple one, ``{child: value}`` for a single compound, and
+                ``[{child: value}, ...]`` for a multiple compound.
+            block: Metadata block name (default ``citation``; e.g. ``geospatial``, ``EngMeta``).
+
+        Returns:
+            The updated GetDatasetResponse.
+        """
+        specs = self.native_api.get_metadatablock(block).fields
+        native: List[dict] = []
+        for name, value in fields.items():
+            if name not in specs:
+                raise ValueError(
+                    f"Unknown field '{name}' in block '{block}'. "
+                    f"Valid fields: {sorted(specs)}"
+                )
+            native.append(_descriptor_from_spec(specs[name], value))
+        if not native:
+            raise ValueError("edit_dataset_fields: no fields provided")
+
+        return self.native_api.edit_dataset_metadata(
+            identifier, {"fields": native}, replace=True
+        )
 
     def _internal_create_dataset(
         self,

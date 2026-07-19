@@ -15,7 +15,7 @@ from fastmcp import Context
 from ..dataverse import Dataverse
 
 
-def ensure_dataverse(
+async def ensure_dataverse(
     ctx: Context,
     base_url: Optional[str] = None,
 ) -> Dataverse:
@@ -32,13 +32,16 @@ def ensure_dataverse(
         RuntimeError: If no Dataverse instance is found or invalid configuration
     """
 
+    # ponytail: tools are async only to await get_state (v3); their Dataverse I/O
+    # is still blocking and runs on the loop. Fine for single-user desktop use;
+    # wrap the native_api calls in asyncify if concurrent throughput ever matters.
     if base_url is None:
-        dataverse = ctx.get_state("dataverse")
+        dataverse = await ctx.get_state("dataverse")
         if isinstance(dataverse, Dataverse):
             return dataverse
         raise RuntimeError("Dataverse is not set in the context.")
 
-    dataverses: TTLCache[str, Dataverse] = ctx.get_state("dataverses")
+    dataverses: TTLCache[str, Dataverse] = await ctx.get_state("dataverses")
     base_url = base_url.rstrip("/")
 
     if base_url in dataverses:

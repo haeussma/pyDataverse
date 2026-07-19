@@ -7,7 +7,7 @@ from toon_format import encode
 from .utils import ensure_dataverse
 
 
-def get_metrics(
+async def get_metrics(
     base_url: Annotated[
         Optional[str],
         "The base URL of the dataverse to use. If not specified, the function will use the dataverse this MCP server is connected to by default.",
@@ -23,5 +23,5 @@ def get_metrics(
     Returns:
         Encoded metrics as a string
     """
-    dataverse = ensure_dataverse(ctx, base_url=base_url)
+    dataverse = await ensure_dataverse(ctx, base_url=base_url)
     return encode(dataverse.metrics.dict())
